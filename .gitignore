@@ -1,0 +1,17 @@
+# Dependencies
+node_modules/
+
+# Compiler Output
+dist/
+*.tsbuildinfo
+
+# Local Database & Storage Shards State
+docker_disks/
+
+# Environment Configurations & Secret keys
+.env
+*.env.local
+
+# Operating System Files
+.DS_Store
+Thumbs.db
