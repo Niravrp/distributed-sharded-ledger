@@ -9,10 +9,31 @@ router.addNode('shard-eastus');
 router.addNode('shard-westus');
 router.addNode('shard-northeurope');
 
-const kafka = new Kafka({
+// 🔐 CLOUD CONFIGURATION DETECTION
+const kafkaBroker = process.env.KAFKA_BROKER || 'kafka:9092';
+const connectionString = process.env.KAFKA_CONNECTION_STRING;
+
+const kafkaConfig: any = {
     clientId: 'api-gateway-proxy',
-    brokers: [process.env.KAFKA_BROKER || 'kafka:9092']
-});
+    brokers: [kafkaBroker],
+    connectionTimeout: 10000,     // Prevents infinite hanging sockets on cold starts
+    authenticationTimeout: 10000,
+};
+
+// If running in Azure, dynamically inject the required SASL_SSL credentials
+if (connectionString) {
+    kafkaConfig.ssl = true;
+    kafkaConfig.sasl = {
+        mechanism: 'plain',
+        username: '$ConnectionString', // ⚠️ This exact literal string is required by Azure Event Hubs
+        password: connectionString     // The raw access key passed securely out of your Bicep file
+    };
+    console.log("🔒 [SYSTEM INITIALIZATION] SASL_SSL encryption profile detected and applied.");
+} else {
+    console.log("🐳 [SYSTEM INITIALIZATION] Defaulting to local infrastructure plaintext profile.");
+}
+
+const kafka = new Kafka(kafkaConfig);
 const producer = kafka.producer();
 
 async function startGateway() {
@@ -23,7 +44,8 @@ async function startGateway() {
             connected = true;
             console.log("⚡ [GATEWAY PRODUCER] Connected to Apache Kafka broker cleanly.");
         } catch (err: any) {
-            console.warn(`⚠️ [GATEWAY] Kafka broker not ready yet. Retrying in 2 seconds...`);
+            // Updated log line to print out the explicit error object back to your console window
+            console.warn(`⚠️ [GATEWAY] Kafka connection failed: ${err.message}. Retrying in 2 seconds...`);
             await new Promise(resolve => setTimeout(resolve, 2000));
         }
     }
@@ -41,7 +63,6 @@ async function startGateway() {
 
             try {
                 const targetNodes = router.getNodes(accountId, 3);
-                // Query primary node first
                 const primaryNode = targetNodes[0];
                 const response = await fetch(`http://${primaryNode}:5001/read?key=${accountId}`);
 
@@ -73,17 +94,13 @@ async function startGateway() {
 
                     console.log(`\n🔒 [RESERVATION STEP] Locking authorization path on Primary Shard [${primaryNode}] for account [${accountId}]`);
 
-                    // 1. Synchronously fetch current balance state
                     let currentBalance = 0;
                     try {
                         const readRes = await fetch(`http://${primaryNode}:5001/read?key=${accountId}`);
                         if (readRes.ok) {
                             const rawData = await readRes.json() as any;
-
-                            // 🔍 DEBUG LINE: This will print the EXACT object structure to your terminal logs
                             console.log(`🔍 [GATEWAY DEBUG] Raw Shard Response Payload: ${JSON.stringify(rawData)}`);
 
-                            // 2. POLYMORPHIC EXTRACTOR: Check every possible structural shape safely
                             if (rawData !== null && typeof rawData === 'object') {
                                 if (typeof rawData.balance === 'number') {
                                     currentBalance = rawData.balance;
@@ -109,17 +126,14 @@ async function startGateway() {
                         currentBalance = 0;
                     }
 
-                    // 3. Compute new balance
                     const newBalance = currentBalance + amount;
 
-                    // 4. MATHEMATICAL GATEKEEPER: Stop NaN from ever moving forward
                     if (Number.isNaN(newBalance)) {
                         console.error(`❌ [CRITICAL FAULT] Balance calculation resulted in NaN! currentBalance: ${currentBalance}, amount: ${amount}`);
                         res.writeHead(500, { 'Content-Type': 'application/json' });
                         return res.end(JSON.stringify({ error: "Internal Mathematical Conversion Fault" }));
                     }
 
-                    // 5. EVALUATE FUNDS
                     if (newBalance < 0) {
                         console.error(`❌ [RESERVATION REJECTED] Account [${accountId}] insufficient funds. Balance: ${currentBalance}, Request: ${amount}`);
                         res.writeHead(402, { 'Content-Type': 'application/json' });
@@ -128,7 +142,6 @@ async function startGateway() {
 
                     console.log(`📝 [RESERVATION APPROVED] Deduced balance locally on [${primaryNode}]. New Balance: ${newBalance}`);
 
-                    // 6. Synchronously commit the balance reservation to primary memory
                     const writeRes = await fetch(`http://${primaryNode}:5001/write`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -140,7 +153,6 @@ async function startGateway() {
 
                     if (!writeRes.ok) throw new Error("Primary Shard memory reservation write failed.");
 
-                    // 7. Offload the paperwork to Kafka
                     const eventPayload = { transactionId, accountId, balance: newBalance, currency, timestamp: Date.now(), primaryNode };
                     await producer.send({
                         topic: 'ledger-transactions',
