@@ -9,28 +9,37 @@ router.addNode('shard-eastus');
 router.addNode('shard-westus');
 router.addNode('shard-northeurope');
 
-// 🔐 CLOUD CONFIGURATION DETECTION
+// 🌍 CLOUD URL RESOLVER: Maps local names to global Azure endpoints
+function getShardBaseUrl(nodeName: string): string {
+    const cloudMap: Record<string, string | undefined> = {
+        'shard-eastus': process.env.SHARD_EASTUS_URL,
+        'shard-westus': process.env.SHARD_WESTUS_URL,
+        'shard-northeurope': process.env.SHARD_NORTHEUROPE_URL,
+    };
+    
+    const cloudUrl = cloudMap[nodeName];
+    // If we are in Azure, use the secure cloud URL (drops the :5001). Otherwise, fallback to local Docker.
+    return cloudUrl ? cloudUrl : `http://${nodeName}:5001`;
+}
+
+// 🔐 CLOUD KAFKA CONFIGURATION DETECTION
 const kafkaBroker = process.env.KAFKA_BROKER || 'kafka:9092';
 const connectionString = process.env.KAFKA_CONNECTION_STRING;
 
 const kafkaConfig: any = {
     clientId: 'api-gateway-proxy',
     brokers: [kafkaBroker],
-    connectionTimeout: 10000,     // Prevents infinite hanging sockets on cold starts
+    connectionTimeout: 10000,     
     authenticationTimeout: 10000,
 };
 
-// If running in Azure, dynamically inject the required SASL_SSL credentials
 if (connectionString) {
     kafkaConfig.ssl = true;
     kafkaConfig.sasl = {
         mechanism: 'plain',
-        username: '$ConnectionString', // ⚠️ This exact literal string is required by Azure Event Hubs
-        password: connectionString     // The raw access key passed securely out of your Bicep file
+        username: '$ConnectionString', 
+        password: connectionString     
     };
-    console.log("🔒 [SYSTEM INITIALIZATION] SASL_SSL encryption profile detected and applied.");
-} else {
-    console.log("🐳 [SYSTEM INITIALIZATION] Defaulting to local infrastructure plaintext profile.");
 }
 
 const kafka = new Kafka(kafkaConfig);
@@ -44,7 +53,6 @@ async function startGateway() {
             connected = true;
             console.log("⚡ [GATEWAY PRODUCER] Connected to Apache Kafka broker cleanly.");
         } catch (err: any) {
-            // Updated log line to print out the explicit error object back to your console window
             console.warn(`⚠️ [GATEWAY] Kafka connection failed: ${err.message}. Retrying in 2 seconds...`);
             await new Promise(resolve => setTimeout(resolve, 2000));
         }
@@ -53,7 +61,7 @@ async function startGateway() {
     const server = createServer(async (req, res) => {
         const urlObj = new URL(req.url || '', `http://${req.headers.host}`);
 
-        // ─── SYNCHRONOUS READ PATH (BYPASSES KAFKA) ───
+        // ─── SYNCHRONOUS READ PATH ───
         if (req.method === 'GET' && urlObj.pathname === '/transaction') {
             const accountId = urlObj.searchParams.get('accountId');
             if (!accountId) {
@@ -64,7 +72,9 @@ async function startGateway() {
             try {
                 const targetNodes = router.getNodes(accountId, 3);
                 const primaryNode = targetNodes[0];
-                const response = await fetch(`http://${primaryNode}:5001/read?key=${accountId}`);
+                const baseUrl = getShardBaseUrl(primaryNode); // 🌍 Resolved URL
+
+                const response = await fetch(`${baseUrl}/read?key=${accountId}`);
 
                 if (response.status === 200) {
                     const data = await response.json();
@@ -80,7 +90,7 @@ async function startGateway() {
             }
         }
 
-        // ─── HYBRID RESERVATION WRITE PATH (STRONG AUTHORIZATION + ASYNC LEDGER) ───
+        // ─── HYBRID RESERVATION WRITE PATH ───
         else if (req.method === 'POST' && urlObj.pathname === '/transaction') {
             let body = '';
             req.on('data', chunk => { body += chunk; });
@@ -91,58 +101,42 @@ async function startGateway() {
 
                     const targetNodes = router.getNodes(accountId, 3);
                     const primaryNode = targetNodes[0];
+                    const baseUrl = getShardBaseUrl(primaryNode); // 🌍 Resolved URL
 
                     console.log(`\n🔒 [RESERVATION STEP] Locking authorization path on Primary Shard [${primaryNode}] for account [${accountId}]`);
+                    console.log(`📡 [NETWORK] Routing cross-ocean HTTP request to: ${baseUrl}`);
 
                     let currentBalance = 0;
                     try {
-                        const readRes = await fetch(`http://${primaryNode}:5001/read?key=${accountId}`);
+                        const readRes = await fetch(`${baseUrl}/read?key=${accountId}`);
                         if (readRes.ok) {
                             const rawData = await readRes.json() as any;
-                            console.log(`🔍 [GATEWAY DEBUG] Raw Shard Response Payload: ${JSON.stringify(rawData)}`);
-
                             if (rawData !== null && typeof rawData === 'object') {
-                                if (typeof rawData.balance === 'number') {
-                                    currentBalance = rawData.balance;
-                                }
-                                else if (rawData.record && typeof rawData.record.balance === 'number') {
-                                    currentBalance = rawData.record.balance;
-                                    console.log(`🎯 [GATEWAY BAL] Parsed balance from record envelope: $${currentBalance}`);
-                                }
-                                else if (rawData.payload && typeof rawData.payload.balance === 'number') {
-                                    currentBalance = rawData.payload.balance;
-                                }
-                                else if (rawData.value && typeof rawData.value.balance === 'number') {
-                                    currentBalance = rawData.value.balance;
-                                }
-                                else {
-                                    console.warn(`⚠️ [GATEWAY BAL] Balance field not found in response objects. Defaulting to $0.`);
-                                    currentBalance = 0;
-                                }
+                                if (typeof rawData.balance === 'number') currentBalance = rawData.balance;
+                                else if (rawData.record && typeof rawData.record.balance === 'number') currentBalance = rawData.record.balance;
+                                else if (rawData.payload && typeof rawData.payload.balance === 'number') currentBalance = rawData.payload.balance;
+                                else if (rawData.value && typeof rawData.value.balance === 'number') currentBalance = rawData.value.balance;
                             }
                         }
                     } catch (readErr) {
                         console.log(`ℹ️ [GATEWAY] Account read failed or doesn't exist yet. Defaulting to $0.`);
-                        currentBalance = 0;
                     }
 
                     const newBalance = currentBalance + amount;
 
                     if (Number.isNaN(newBalance)) {
-                        console.error(`❌ [CRITICAL FAULT] Balance calculation resulted in NaN! currentBalance: ${currentBalance}, amount: ${amount}`);
                         res.writeHead(500, { 'Content-Type': 'application/json' });
                         return res.end(JSON.stringify({ error: "Internal Mathematical Conversion Fault" }));
                     }
 
                     if (newBalance < 0) {
-                        console.error(`❌ [RESERVATION REJECTED] Account [${accountId}] insufficient funds. Balance: ${currentBalance}, Request: ${amount}`);
                         res.writeHead(402, { 'Content-Type': 'application/json' });
                         return res.end(JSON.stringify({ error: "Insufficient Funds", currentBalance }));
                     }
 
                     console.log(`📝 [RESERVATION APPROVED] Deduced balance locally on [${primaryNode}]. New Balance: ${newBalance}`);
 
-                    const writeRes = await fetch(`http://${primaryNode}:5001/write`, {
+                    const writeRes = await fetch(`${baseUrl}/write`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({

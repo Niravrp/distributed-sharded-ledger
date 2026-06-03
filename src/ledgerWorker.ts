@@ -6,11 +6,27 @@ router.addNode('shard-eastus');
 router.addNode('shard-westus');
 router.addNode('shard-northeurope');
 
-const kafka = new Kafka({
-    clientId: 'ledger-worker-processor',
-    brokers: [process.env.KAFKA_BROKER || 'kafka:9092']
-});
+const kafkaBroker = process.env.KAFKA_BROKER || 'kafka:9092';
+const connectionString = process.env.KAFKA_CONNECTION_STRING;
 
+const kafkaConfig: any = {
+    clientId: 'ledger-worker-service',
+    brokers: [kafkaBroker],
+    connectionTimeout: 10000,
+    authenticationTimeout: 10000,
+};
+
+if (connectionString) {
+    kafkaConfig.ssl = true;
+    kafkaConfig.sasl = {
+        mechanism: 'plain',
+        username: '$ConnectionString',
+        password: connectionString
+    };
+    console.log("🔒 [WORKER INITIALIZATION] SASL_SSL encryption profile applied.");
+}
+
+const kafka = new Kafka(kafkaConfig);
 const consumer = kafka.consumer({ groupId: 'ledger-workers-cluster' });
 
 async function startWorker() {
