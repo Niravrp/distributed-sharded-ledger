@@ -37,10 +37,21 @@ graph TD
 4. **Storage Shards (`shard-eastus`, `shard-westus`, `shard-northeurope`):** Multi-region data nodes running a **Custom LSM-tree Storage Engine**. Data is absorbed into an in-memory buffer and sequentially flushed to disk to guarantee high write throughput without I/O blocking.
 
 ## 🛠️ Tech Stack
-* **Compute:** Azure Container Apps, Node.js (V8)
+* **Compute:** Docker, Azure Container Apps, Node.js (V8)
 * **Messaging/Queuing:** Azure Event Hubs (Kafka protocol), KEDA (Event-driven Autoscaler)
 * **Database:** Custom LSM-tree Engine (In-memory MemTable + Disk SSTables)
+* **Infrastructure & CI/CD:** Terraform / Infrastructure as Code (IaC), GitHub Actions, Azure Container Registry (ACR)
 * **Testing & Observability:** Grafana k6 (Chaos/Load Testing), Azure Monitor, Log Analytics
+
+---
+
+## 🏗️ Infrastructure & Deployment (CI/CD)
+
+To ensure this architecture is fully reproducible and production-ready, all cloud resources and application code are managed via a modern DevOps pipeline.
+
+* **Containerization:** All microservices (Gateway, Worker, Shards) are packaged using highly optimized, multi-stage `Dockerfile` configurations to minimize image size and attack surface.
+* **Infrastructure as Code (IaC):** Azure resources—including the Container Apps Environment, Event Hubs namespaces, Kafka partitions, and KEDA scaling thresholds—are declaratively provisioned, eliminating configuration drift.
+* **Continuous Integration (CI/CD):** Automated pipelines (e.g., GitHub Actions) are utilized to test the Node.js source code, build the Docker images, push them to the Azure Container Registry (ACR), and trigger rolling zero-downtime deployments to the Azure Container Apps.
 
 ---
 
