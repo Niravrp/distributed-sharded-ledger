@@ -1,6 +1,18 @@
 import { Kafka } from 'kafkajs';
 import { ConsistentHashRouter } from './consistentHashRouter.js';
 
+// 🌍 CLOUD URL RESOLVER: Maps local names to global Azure endpoints
+function getShardBaseUrl(nodeName: string): string {
+    const cloudMap: Record<string, string | undefined> = {
+        'shard-eastus': process.env.SHARD_EASTUS_URL,
+        'shard-westus': process.env.SHARD_WESTUS_URL,
+        'shard-northeurope': process.env.SHARD_NORTHEUROPE_URL,
+    };
+    
+    const cloudUrl = cloudMap[nodeName];
+    return cloudUrl ? cloudUrl : `http://${nodeName}:5001`;
+}
+
 const router = new ConsistentHashRouter(100);
 router.addNode('shard-eastus');
 router.addNode('shard-westus');
@@ -71,7 +83,10 @@ async function startWorker() {
 
                 // Replicate exclusively to the backup nodes across regions
                 const replicationPromises = backupNodes.map(async (node) => {
-                    const response = await fetch(`http://${node}:5001/write`, {
+                    const baseUrl = getShardBaseUrl(node); // 🌍 Resolve to cloud URL
+                    console.log(`[WORKER] Replicating to ${baseUrl}...`);
+
+                    const response = await fetch(`${baseUrl}/write`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ key: accountId, payload })
